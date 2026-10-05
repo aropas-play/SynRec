@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E1B4B"/>
+    </linearGradient>
+
+    <!-- Polygon Center Gradient -->
+    <linearGradient id="polyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0EA5E9" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#F59E0B" stop-opacity="0.95"/>
+    </linearGradient>
+
+    <!-- Camera Body Gradient -->
+    <linearGradient id="camGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 1. Background -->
+  <rect width="1024" height="1024" rx="180" fill="url(#bgGrad)"/>
+
+  <!-- Orbit Ring -->
+  <circle cx="512" cy="512" r="330" fill="none" stroke="#38BDF8" stroke-width="4" stroke-dasharray="14 14" opacity="0.35"/>
+
+  <!-- 2. Laser Sightlines (120 Degree Axes) -->
+  <line x1="512" y1="182" x2="512" y2="512" stroke="#38BDF8" stroke-width="12" opacity="0.4"/>
+  <line x1="512" y1="182" x2="512" y2="512" stroke="#38BDF8" stroke-width="4" opacity="0.95"/>
+
+  <line x1="797.8" y1="677" x2="512" y2="512" stroke="#38BDF8" stroke-width="12" opacity="0.4"/>
+  <line x1="797.8" y1="677" x2="512" y2="512" stroke="#38BDF8" stroke-width="4" opacity="0.95"/>
+
+  <line x1="226.2" y1="677" x2="512" y2="512" stroke="#38BDF8" stroke-width="12" opacity="0.4"/>
+  <line x1="226.2" y1="677" x2="512" y2="512" stroke="#38BDF8" stroke-width="4" opacity="0.95"/>
+
+  <!-- 3. Irregular Polygon at Center (Scaled Down to Prevent Overlap) -->
+  <polygon points="490,482 530,478 546,506 538,538 506,548 482,530 478,504" fill="url(#polyGrad)" stroke="#FFFFFF" stroke-width="2.5"/>
+
+  <!-- Facet Wireframe Lines -->
+  <line x1="512" y1="512" x2="490" y2="482" stroke="#FFFFFF" stroke-width="1.8" opacity="0.8"/>
+  <line x1="512" y1="512" x2="530" y2="478" stroke="#FFFFFF" stroke-width="1.8" opacity="0.8"/>
+  <line x1="512" y1="512" x2="546" y2="506" stroke="#FFFFFF" stroke-width="1.8" opacity="0.8"/>
+  <line x1="512" y1="512" x2="538" y2="538" stroke="#FFFFFF" stroke-width="1.8" opacity="0.8"/>
+  <line x1="512" y1="512" x2="506" y2="548" stroke="#FFFFFF" stroke-width="1.8" opacity="0.8"/>
+  <line x1="512" y1="512" x2="482" y2="530" stroke="#FFFFFF" stroke-width="1.8" opacity="0.8"/>
+  <line x1="512" y1="512" x2="478" y2="504" stroke="#FFFFFF" stroke-width="1.8" opacity="0.8"/>
+
+  <!-- Node Dots -->
+  <circle cx="490" cy="482" r="4.5" fill="#FFFFFF"/>
+  <circle cx="530" cy="478" r="4.5" fill="#FFFFFF"/>
+  <circle cx="546" cy="506" r="4.5" fill="#FFFFFF"/>
+  <circle cx="538" cy="538" r="4.5" fill="#FFFFFF"/>
+  <circle cx="506" cy="548" r="4.5" fill="#FFFFFF"/>
+  <circle cx="482" cy="530" r="4.5" fill="#FFFFFF"/>
+  <circle cx="478" cy="504" r="4.5" fill="#FFFFFF"/>
+  <circle cx="512" cy="512" r="6" fill="#FFFFFF"/>
+
+  <!-- 4. Three MAGNIFIED Cameras (3x Larger) -->
+  <!-- Camera 1: Top (270 deg / Facing Down) -->
+  <g transform="translate(512, 182) rotate(90)">
+    <rect x="-95" y="-62.5" width="190" height="125" rx="16" fill="url(#camGrad)" stroke="#94A3B8" stroke-width="5"/>
+    <rect x="95" y="-42.5" width="55" height="85" fill="#0F172A"/>
+    <ellipse cx="136" cy="0" rx="11" ry="38" fill="#38BDF8"/>
+    <circle cx="142" cy="0" r="7" fill="#E0F2FE"/>
+    <circle cx="-60" cy="-38" r="11" fill="#EF4444"/>
+  </g>
+
+  <!-- Camera 2: Bottom Right (30 deg / Facing Center 210 deg) -->
+  <g transform="translate(797.8, 677) rotate(210)">
+    <rect x="-95" y="-62.5" width="190" height="125" rx="16" fill="url(#camGrad)" stroke="#94A3B8" stroke-width="5"/>
+    <rect x="95" y="-42.5" width="55" height="85" fill="#0F172A"/>
+    <ellipse cx="136" cy="0" rx="11" ry="38" fill="#38BDF8"/>
+    <circle cx="142" cy="0" r="7" fill="#E0F2FE"/>
+    <circle cx="-60" cy="-38" r="11" fill="#EF4444"/>
+  </g>
+
+  <!-- Camera 3: Bottom Left (150 deg / Facing Center 330 deg) -->
+  <g transform="translate(226.2, 677) rotate(330)">
+    <rect x="-95" y="-62.5" width="190" height="125" rx="16" fill="url(#camGrad)" stroke="#94A3B8" stroke-width="5"/>
+    <rect x="95" y="-42.5" width="55" height="85" fill="#0F172A"/>
+    <ellipse cx="136" cy="0" rx="11" ry="38" fill="#38BDF8"/>
+    <circle cx="142" cy="0" r="7" fill="#E0F2FE"/>
+    <circle cx="-60" cy="-38" r="11" fill="#EF4444"/>
+  </g>
+</svg>
