@@ -1,14 +1,21 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:camera/camera.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import '../services/camera_service.dart';
 import '../services/storage_service.dart';
 import '../services/sync_service.dart';
+import '../services/video_stream_service.dart';
+
+enum AppFragment { synrec, synviewrec }
 
 class AppController extends ChangeNotifier {
   final CameraService cameraService = CameraService();
   final StorageService storageService = StorageService();
   final SyncService syncService = SyncService();
+  final VideoStreamService videoStreamService = VideoStreamService();
+
+  AppFragment _activeFragment = AppFragment.synrec;
 
   bool _isMaster = true;
   bool _isRecording = false;
@@ -17,6 +24,7 @@ class AppController extends ChangeNotifier {
   String _statusMessage = "Initializing...";
   final List<String> _logs = [];
 
+  AppFragment get activeFragment => _activeFragment;
   bool get isMaster => _isMaster;
   bool get isRecording => _isRecording;
   bool get isCameraInitialized => cameraService.isInitialized;
@@ -34,11 +42,51 @@ class AppController extends ChangeNotifier {
   String get myDeviceName => syncService.myDeviceName;
   String get localIpAddress => syncService.localIpAddress;
   List<SyncDeviceItem> get discoveredDevices => syncService.discoveredDevices;
+  List<SyncDeviceItem> get favoriteDevices => syncService.favoriteDevices;
   List<SyncDeviceItem> get linkingCandidates => syncService.linkingCandidates;
+  List<SyncDeviceItem> get activeCandidateList => syncService.activeCandidates;
   SyncDeviceItem? get selectedDevice => syncService.selectedDevice;
   String get pairingReminder => syncService.pairingReminder;
 
+  // Requirement 2: Per-device recording state check
+  bool isDeviceRecording(String deviceId) => syncService.isDeviceRecording(deviceId);
+
+  // Folder Manager Getters & Setters
+  String? get customPhotosFolder => storageService.customPhotosPath;
+  String? get customVideosFolder => storageService.customVideosPath;
+
+  Future<void> saveCustomFolders(String? photosPath, String? videosPath) async {
+    await storageService.saveCustomFolderSettings(photosPath, videosPath);
+    _addLog("Updated custom save folders in Folder Manager.");
+    notifyListeners();
+  }
+
+  // Video Streaming Getters
+  Uint8List? get slaveFrameBytes => videoStreamService.latestFrameBytes;
+  bool get isReceivingSlaveStream => videoStreamService.isReceivingStream;
+
+  String get activeStreamTargetIp {
+    if (videoStreamService.currentStreamSourceIp != null) {
+      return videoStreamService.currentStreamSourceIp!;
+    }
+    if (selectedDevice != null && _isValidRemoteSlaveIp(selectedDevice!.id)) {
+      return selectedDevice!.id;
+    }
+    for (var candidate in activeCandidateList) {
+      if (_isValidRemoteSlaveIp(candidate.id)) {
+        return candidate.id;
+      }
+    }
+    for (var dev in discoveredDevices) {
+      if (_isValidRemoteSlaveIp(dev.id)) {
+        return dev.id;
+      }
+    }
+    return "Searching for Slave Target IP...";
+  }
+
   bool isCandidateSelected(SyncDeviceItem device) => syncService.isCandidateSelected(device);
+  bool isFavoriteSelected(SyncDeviceItem device) => syncService.isFavoriteSelected(device);
 
   AppController() {
     _init();
@@ -60,7 +108,167 @@ class AppController extends ChangeNotifier {
     syncService.onLogMessage = _addLog;
     syncService.setMode(isMaster: _isMaster);
 
+    videoStreamService.onLogMessage = _addLog;
+    videoStreamService.addListener(notifyListeners);
+
+    // If Slave target, start streaming server so Master can view Slave's feed
+    _setupVideoStreamServerIfNeeded();
+
     notifyListeners();
+  }
+
+  Timer? _slaveCameraStreamTimer;
+  Timer? _masterStreamRetryTimer;
+  bool _isCapturingSlaveFrame = false;
+
+  void _setupVideoStreamServerIfNeeded() async {
+    if (!_isMaster) {
+      bool started = await videoStreamService.startStreamServer(port: 8890);
+      if (started) {
+        _startSlaveCameraFrameBroadcaster();
+      }
+    } else {
+      _slaveCameraStreamTimer?.cancel();
+    }
+  }
+
+  void _startSlaveCameraFrameBroadcaster() {
+    _slaveCameraStreamTimer?.cancel();
+    _slaveCameraStreamTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) async {
+      if (_isMaster) {
+        timer.cancel();
+        return;
+      }
+
+      if (_isCapturingSlaveFrame) return; // Prevent concurrent takePicture calls on native camera thread
+
+      _isCapturingSlaveFrame = true;
+      try {
+        if (cameraService.isInitialized && !cameraService.isVirtualMode) {
+          XFile? frameFile = await cameraService.takePicture();
+          if (frameFile != null) {
+            Uint8List bytes = await frameFile.readAsBytes();
+            videoStreamService.broadcastJpegFrame(bytes);
+          } else {
+            videoStreamService.broadcastJpegFrame(VideoStreamService.validTestJpeg);
+          }
+        } else {
+          videoStreamService.broadcastJpegFrame(VideoStreamService.validTestJpeg);
+        }
+      } catch (e) {
+        videoStreamService.broadcastJpegFrame(VideoStreamService.validTestJpeg);
+      } finally {
+        _isCapturingSlaveFrame = false;
+      }
+    });
+  }
+
+  void setFragment(AppFragment fragment) {
+    if (_activeFragment == fragment) return;
+    _activeFragment = fragment;
+    _addLog("Switched fragment to: ${fragment.name}");
+
+    if (_activeFragment == AppFragment.synviewrec && _isMaster && isPaired) {
+      _connectToFirstSlaveStream();
+    } else if (_activeFragment == AppFragment.synrec) {
+      _masterStreamRetryTimer?.cancel();
+      videoStreamService.stopStreamReceiver();
+    }
+
+    notifyListeners();
+  }
+
+  void navigateNextFragment() {
+    if (_activeFragment == AppFragment.synrec) {
+      setFragment(AppFragment.synviewrec);
+    }
+  }
+
+  void navigatePreviousFragment() {
+    if (_activeFragment == AppFragment.synviewrec) {
+      setFragment(AppFragment.synrec);
+    }
+  }
+
+  void _connectToFirstSlaveStream() {
+    _masterStreamRetryTimer?.cancel();
+
+    _attemptSlaveStreamConnection();
+
+    // Periodically retry every 2 seconds if not yet connected
+    _masterStreamRetryTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (_activeFragment != AppFragment.synviewrec || !_isMaster || !isPaired) {
+        timer.cancel();
+        return;
+      }
+      if (!videoStreamService.isReceivingStream) {
+        _attemptSlaveStreamConnection();
+      }
+    });
+  }
+
+  void _attemptSlaveStreamConnection() {
+    List<String> candidateIps = [];
+
+    // 1. Prioritize dynamically discovered real network slave devices (e.g. HUAWEI P30 lite1)
+    for (var dev in discoveredDevices) {
+      if (_isValidRemoteSlaveIp(dev.id) && !candidateIps.contains(dev.id)) {
+        candidateIps.add(dev.id);
+      }
+    }
+
+    // 2. Check user explicitly selected device if valid remote IP
+    if (selectedDevice != null && _isValidRemoteSlaveIp(selectedDevice!.id) && !candidateIps.contains(selectedDevice!.id)) {
+      candidateIps.add(selectedDevice!.id);
+    }
+
+    // 3. Add candidates from linkingCandidates
+    for (var candidate in activeCandidateList) {
+      if (_isValidRemoteSlaveIp(candidate.id) && !candidateIps.contains(candidate.id)) {
+        candidateIps.add(candidate.id);
+      }
+    }
+
+    if (candidateIps.isNotEmpty) {
+      _tryConnectNextSlaveIp(candidateIps, 0);
+    } else {
+      _addLog("No valid remote slave IP found to stream video. Please select or add slave target IP.");
+    }
+  }
+
+  bool _isValidRemoteSlaveIp(String ip) {
+    if (ip.isEmpty || ip.contains("target_")) return false;
+    // Exclude 192.168.43.1 if it's the static Hotspot default IP and not an auto-discovered slave device
+    if (ip == "192.168.43.1" && !_isRealDiscoveredSlaveIp(ip)) return false;
+    // Don't connect to local loopback or local device IP
+    if (ip == "127.0.0.1" || (localIpAddress.isNotEmpty && ip == localIpAddress)) return false;
+    // Must match IPv4 format
+    return RegExp(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$').hasMatch(ip);
+  }
+
+  bool _isRealDiscoveredSlaveIp(String ip) {
+    for (var dev in discoveredDevices) {
+      if (dev.id == ip && !dev.name.contains("Master Mobile Hotspot")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void _tryConnectNextSlaveIp(List<String> candidateIps, int index) async {
+    if (index >= candidateIps.length) {
+      _addLog("Tried all candidate slave IPs, none reachable for video stream.");
+      return;
+    }
+
+    String slaveIp = candidateIps[index];
+    _addLog("Connecting Master to Slave video stream ($slaveIp) [Candidate ${index + 1}/${candidateIps.length}]...");
+
+    bool success = await videoStreamService.connectToSlaveStream(slaveIp, port: 8890);
+    if (!success && index + 1 < candidateIps.length) {
+      _addLog("Slave $slaveIp unreachable. Trying next slave candidate (${candidateIps[index + 1]})...");
+      _tryConnectNextSlaveIp(candidateIps, index + 1);
+    }
   }
 
   void setMasterMode(bool isMaster) {
@@ -68,6 +276,16 @@ class AppController extends ChangeNotifier {
     syncService.setMode(isMaster: isMaster);
     _addLog("Target mode set to: ${isMaster ? 'Master' : 'Slave'}");
     _statusMessage = syncService.statusMessage;
+
+    if (!_isMaster) {
+      _setupVideoStreamServerIfNeeded();
+    } else {
+      videoStreamService.stopStreamServer();
+      if (_activeFragment == AppFragment.synviewrec && isPaired) {
+        _connectToFirstSlaveStream();
+      }
+    }
+
     notifyListeners();
   }
 
@@ -75,6 +293,11 @@ class AppController extends ChangeNotifier {
     syncService.selectDevice(device);
     _addLog("Selected target device: ${device?.name}");
     _statusMessage = syncService.statusMessage;
+
+    if (_activeFragment == AppFragment.synviewrec && _isMaster) {
+      _connectToFirstSlaveStream();
+    }
+
     notifyListeners();
   }
 
@@ -82,24 +305,51 @@ class AppController extends ChangeNotifier {
     syncService.addCustomDevice(name, ipOrId);
     _addLog("Added custom target device: $name (IP: $ipOrId)");
     _statusMessage = syncService.statusMessage;
+
+    if (_activeFragment == AppFragment.synviewrec && _isMaster) {
+      _connectToFirstSlaveStream();
+    }
+
     notifyListeners();
   }
 
   void toggleCandidate(SyncDeviceItem device) {
     syncService.toggleCandidate(device);
     _statusMessage = syncService.statusMessage;
+
+    if (_activeFragment == AppFragment.synviewrec && _isMaster && isPaired) {
+      _connectToFirstSlaveStream();
+    }
+
+    notifyListeners();
+  }
+
+  void toggleFavoriteCandidate(SyncDeviceItem device) {
+    syncService.toggleFavoriteCandidate(device);
+    _statusMessage = syncService.statusMessage;
+
+    if (_activeFragment == AppFragment.synviewrec && _isMaster && isPaired) {
+      _connectToFirstSlaveStream();
+    }
+
     notifyListeners();
   }
 
   void selectAllCandidates() {
     syncService.selectAllCandidates();
     _statusMessage = syncService.statusMessage;
+
+    if (_activeFragment == AppFragment.synviewrec && _isMaster && isPaired) {
+      _connectToFirstSlaveStream();
+    }
+
     notifyListeners();
   }
 
   void clearCandidates() {
     syncService.clearCandidates();
     _statusMessage = syncService.statusMessage;
+    videoStreamService.stopStreamReceiver();
     notifyListeners();
   }
 
@@ -122,6 +372,11 @@ class AppController extends ChangeNotifier {
     bool paired = await syncService.executePairing();
     _addLog(paired ? "Pairing successful! Connected to ${selectedDevice?.name}" : "Pairing failed.");
     _statusMessage = syncService.statusMessage;
+
+    if (paired && _activeFragment == AppFragment.synviewrec && _isMaster) {
+      _connectToFirstSlaveStream();
+    }
+
     notifyListeners();
   }
 
@@ -153,8 +408,9 @@ class AppController extends ChangeNotifier {
         if (_isMaster) {
           try {
             File startFile = await storageService.createStartFile(isPhoto: true);
-            bool sent = await syncService.sendStartedTriggerFile(startFile);
-            _addLog(sent ? "Sent 'TAKE_PHOTO' trigger via Bluetooth." : "Created photo trigger start.txt.");
+            bool onlyFirstDevice = (_activeFragment == AppFragment.synviewrec);
+            bool sent = await syncService.sendStartedTriggerFile(startFile, onlyFirstDevice: onlyFirstDevice);
+            _addLog(sent ? "Sent 'TAKE_PHOTO' trigger via Bluetooth/Socket." : "Created photo trigger start.txt.");
           } catch (e) {
             _addLog("Error sending photo trigger file: $e");
           }
@@ -198,10 +454,11 @@ class AppController extends ChangeNotifier {
       if (_isMaster) {
         try {
           File startedFile = await storageService.createStartFile(isPhoto: false);
-          bool sent = await syncService.sendStartedTriggerFile(startedFile);
-          _addLog(sent ? "Sent 'start.txt' file via Bluetooth." : "Attempted sending Bluetooth start.txt file.");
+          bool onlyFirstDevice = (_activeFragment == AppFragment.synviewrec);
+          bool sent = await syncService.sendStartedTriggerFile(startedFile, onlyFirstDevice: onlyFirstDevice);
+          _addLog(sent ? "Sent 'start.txt' file via Bluetooth/Socket." : "Attempted sending start.txt file.");
         } catch (e) {
-          _addLog("Error sending Bluetooth file: $e");
+          _addLog("Error sending Bluetooth/Socket file: $e");
         }
       }
 
@@ -248,8 +505,9 @@ class AppController extends ChangeNotifier {
     if (!isTriggered) {
       try {
         File stopFile = await storageService.createStopFile();
-        bool sent = await syncService.sendStopTriggerFile(stopFile);
-        _addLog(sent ? "Sent 'stop.txt' file to sync stop on both targets." : "Created stop.txt locally.");
+        bool onlyFirstDevice = (_activeFragment == AppFragment.synviewrec);
+        bool sent = await syncService.sendStopTriggerFile(stopFile, onlyFirstDevice: onlyFirstDevice);
+        _addLog(sent ? "Sent 'stop.txt' file to sync stop on target(s)." : "Created stop.txt locally.");
       } catch (e) {
         _addLog("Error creating stop file: $e");
       }
@@ -290,6 +548,10 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _slaveCameraStreamTimer?.cancel();
+    _masterStreamRetryTimer?.cancel();
+    videoStreamService.removeListener(notifyListeners);
+    videoStreamService.dispose();
     cameraService.dispose();
     syncService.dispose();
     super.dispose();

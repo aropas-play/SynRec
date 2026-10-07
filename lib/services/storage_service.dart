@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -8,20 +9,124 @@ import 'package:path_provider/path_provider.dart';
 
 class StorageService {
   String _lastCheckedDirectory = "";
+  String? _customPhotosPath;
+  String? _customVideosPath;
+
   String get lastCheckedDirectory => _lastCheckedDirectory;
+  String? get customPhotosPath => _customPhotosPath;
+  String? get customVideosPath => _customVideosPath;
+
+  StorageService() {
+    _loadCustomFolderSettings();
+  }
+
+  /// Get active photos destination folder
+  Future<String> getPhotosFolder() async {
+    if (_customPhotosPath != null && _customPhotosPath!.trim().isNotEmpty) {
+      Directory customDir = Directory(_customPhotosPath!.trim());
+      if (!customDir.existsSync()) {
+        try {
+          customDir.createSync(recursive: true);
+        } catch (_) {}
+      }
+      return customDir.path;
+    }
+
+    Directory appDocDir = await getApplicationDocumentsDirectory();
+    String defaultFolder = p.join(appDocDir.path, 'synrec_photos');
+    Directory(defaultFolder).createSync(recursive: true);
+    return defaultFolder;
+  }
+
+  /// Get active videos destination folder
+  Future<String> getVideosFolder() async {
+    if (_customVideosPath != null && _customVideosPath!.trim().isNotEmpty) {
+      Directory customDir = Directory(_customVideosPath!.trim());
+      if (!customDir.existsSync()) {
+        try {
+          customDir.createSync(recursive: true);
+        } catch (_) {}
+      }
+      return customDir.path;
+    }
+
+    Directory appDocDir = await getApplicationDocumentsDirectory();
+    String defaultFolder = p.join(appDocDir.path, 'synrec_videos');
+    Directory(defaultFolder).createSync(recursive: true);
+    return defaultFolder;
+  }
+
+  /// Save custom folder settings
+  Future<void> saveCustomFolderSettings(String? photosPath, String? videosPath) async {
+    _customPhotosPath = photosPath?.trim();
+    _customVideosPath = videosPath?.trim();
+
+    try {
+      Directory appDocDir = await getApplicationDocumentsDirectory();
+      File settingsFile = File(p.join(appDocDir.path, 'folder_settings.json'));
+      Map<String, dynamic> data = {
+        'photos_folder': _customPhotosPath ?? '',
+        'videos_folder': _customVideosPath ?? '',
+      };
+      await settingsFile.writeAsString(jsonEncode(data));
+    } catch (e) {
+      debugPrint("Error saving folder settings: $e");
+    }
+  }
+
+  /// Load custom folder settings
+  Future<void> _loadCustomFolderSettings() async {
+    try {
+      Directory appDocDir = await getApplicationDocumentsDirectory();
+      File settingsFile = File(p.join(appDocDir.path, 'folder_settings.json'));
+      if (await settingsFile.exists()) {
+        String content = await settingsFile.readAsString();
+        Map<String, dynamic> data = jsonDecode(content);
+        String photos = data['photos_folder'] ?? '';
+        String videos = data['videos_folder'] ?? '';
+        _customPhotosPath = photos.isNotEmpty ? photos : null;
+        _customVideosPath = videos.isNotEmpty ? videos : null;
+      }
+    } catch (e) {
+      debugPrint("Error loading folder settings: $e");
+    }
+  }
+
+  /// Save favorites candidate list to `favorites.json`
+  Future<void> saveFavorites(List<Map<String, String>> favorites) async {
+    try {
+      Directory appDocDir = await getApplicationDocumentsDirectory();
+      File favFile = File(p.join(appDocDir.path, 'favorites.json'));
+      await favFile.writeAsString(jsonEncode(favorites));
+    } catch (e) {
+      debugPrint("Error saving favorites: $e");
+    }
+  }
+
+  /// Load favorites candidate list from `favorites.json`
+  Future<List<Map<String, String>>> loadFavorites() async {
+    try {
+      Directory appDocDir = await getApplicationDocumentsDirectory();
+      File favFile = File(p.join(appDocDir.path, 'favorites.json'));
+      if (await favFile.exists()) {
+        String content = await favFile.readAsString();
+        List<dynamic> list = jsonDecode(content);
+        return list.map((item) => Map<String, String>.from(item)).toList();
+      }
+    } catch (e) {
+      debugPrint("Error loading favorites: $e");
+    }
+    return [];
+  }
 
   /// Save the recorded video file with name `recxxxx.mp4`
-  /// where `xxxx` is a formatted timestamp.
   Future<String?> saveRecordedVideo(XFile videoFile) async {
     try {
       String timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
       String fileName = 'rec$timestamp.mp4';
 
-      Directory appDocDir = await getApplicationDocumentsDirectory();
-      String synrecFolder = p.join(appDocDir.path, 'synrec_videos');
-      Directory(synrecFolder).createSync(recursive: true);
-
-      String targetPath = p.join(synrecFolder, fileName);
+      String targetFolder = await getVideosFolder();
+      String targetPath = p.join(targetFolder, fileName);
       File savedFile = await File(videoFile.path).copy(targetPath);
 
       // Attempt saving to system gallery if on supported mobile/desktop platform
@@ -50,11 +155,8 @@ class StorageService {
       String timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
       String fileName = 'photo_$timestamp.jpg';
 
-      Directory appDocDir = await getApplicationDocumentsDirectory();
-      String synrecFolder = p.join(appDocDir.path, 'synrec_photos');
-      Directory(synrecFolder).createSync(recursive: true);
-
-      String targetPath = p.join(synrecFolder, fileName);
+      String targetFolder = await getPhotosFolder();
+      String targetPath = p.join(targetFolder, fileName);
       File savedFile = await File(photoFile.path).copy(targetPath);
 
       // Save to public Downloads / Photos on Android as well
