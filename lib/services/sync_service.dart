@@ -19,6 +19,16 @@ class SyncDeviceItem {
     this.bleDevice,
   });
 
+  Map<String, String> toJson() => {
+        'id': id,
+        'name': name,
+      };
+
+  factory SyncDeviceItem.fromJson(Map<String, dynamic> json) => SyncDeviceItem(
+        id: json['id'] ?? '',
+        name: json['name'] ?? '',
+      );
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -32,7 +42,7 @@ class SyncDeviceItem {
 
 class SyncService {
   ServerSocket? _serverSocket;
-  Socket? _pairedSocket;
+  final Map<String, Socket> _pairedSockets = {};
   RawDatagramSocket? _udpSocket;
   final List<Socket> _connectedClients = [];
   StreamSubscription? _bleScanSub;
@@ -53,28 +63,59 @@ class SyncService {
   String _pairingReminder = "Make target Bluetooth Visible or connect to Master's Mobile Hotspot (192.168.43.1).";
 
   List<SyncDeviceItem> _discoveredDevices = [];
+  List<SyncDeviceItem> _favoriteDevices = [];
   SyncDeviceItem? _selectedDevice;
+
   final Set<String> _linkingCandidateIds = {};
+  final Set<String> _favoriteCandidateIds = {};
+  final Map<String, bool> _deviceRecordingStatus = {};
 
   OnTriggerCallback? onTriggerReceived;
   OnTriggerCallback? onStopTriggerReceived;
   OnLogCallback? onLogMessage;
 
   bool get isMaster => _isMaster;
-  bool get isPaired => _isPaired || _linkingCandidateIds.isNotEmpty;
+  bool get isPaired => _isPaired || activeCandidates.isNotEmpty;
   bool get isScanning => _isScanning;
   String get myDeviceName => _myDeviceName;
   String get localIpAddress => _localIpAddress;
   String get statusMessage => _lastStatusMessage;
   String get pairingReminder => _pairingReminder;
   List<SyncDeviceItem> get discoveredDevices => List.unmodifiable(_discoveredDevices);
+  List<SyncDeviceItem> get favoriteDevices => List.unmodifiable(_favoriteDevices);
   SyncDeviceItem? get selectedDevice => _selectedDevice;
 
-  List<SyncDeviceItem> get linkingCandidates =>
-      _discoveredDevices.where((d) => _linkingCandidateIds.contains(d.id)).toList();
+  /// Active candidate devices selected across Favorites and Found Devices lists
+  List<SyncDeviceItem> get activeCandidates {
+    List<SyncDeviceItem> candidates = [];
+
+    // 1. Add checked items from Favorites List
+    for (var dev in _favoriteDevices) {
+      if (_favoriteCandidateIds.contains(dev.id) && !candidates.contains(dev)) {
+        candidates.add(dev);
+      }
+    }
+
+    // 2. Add checked items from Found Devices Around List
+    for (var dev in _discoveredDevices) {
+      if (_linkingCandidateIds.contains(dev.id) && !candidates.contains(dev)) {
+        candidates.add(dev);
+      }
+    }
+
+    return candidates;
+  }
+
+  List<SyncDeviceItem> get linkingCandidates => activeCandidates;
 
   bool isCandidateSelected(SyncDeviceItem device) =>
       _linkingCandidateIds.contains(device.id);
+
+  bool isFavoriteSelected(SyncDeviceItem device) =>
+      _favoriteCandidateIds.contains(device.id);
+
+  bool isDeviceRecording(String deviceId) =>
+      _deviceRecordingStatus[deviceId] ?? false;
 
   void toggleCandidate(SyncDeviceItem device) {
     if (_linkingCandidateIds.contains(device.id)) {
@@ -83,30 +124,76 @@ class SyncService {
       _linkingCandidateIds.add(device.id);
     }
     _selectedDevice = device;
-    _isPaired = _linkingCandidateIds.isNotEmpty || _selectedDevice != null;
+    _isPaired = activeCandidates.isNotEmpty;
     _updateStatus();
-    _log("Toggled candidate: ${device.name}. Total selected: ${_linkingCandidateIds.length}");
+    _saveFavoritesToStorage();
+    _log("Toggled candidate: ${device.name}. Total active: ${activeCandidates.length}");
+  }
+
+  void toggleFavoriteCandidate(SyncDeviceItem device) {
+    if (_favoriteCandidateIds.contains(device.id)) {
+      _favoriteCandidateIds.remove(device.id);
+    } else {
+      _favoriteCandidateIds.add(device.id);
+    }
+    _selectedDevice = device;
+    _isPaired = activeCandidates.isNotEmpty;
+    _updateStatus();
+    _saveFavoritesToStorage();
+    _log("Toggled favorite: ${device.name}. Total active: ${activeCandidates.length}");
   }
 
   void selectAllCandidates() {
     _linkingCandidateIds.addAll(_discoveredDevices.map((d) => d.id));
-    _isPaired = _linkingCandidateIds.isNotEmpty;
+    _favoriteCandidateIds.addAll(_favoriteDevices.map((d) => d.id));
+    _isPaired = activeCandidates.isNotEmpty;
     _updateStatus();
-    _log("Selected all ${_linkingCandidateIds.length} candidate device(s).");
+    _saveFavoritesToStorage();
+    _log("Selected all candidate device(s).");
   }
 
   void clearCandidates() {
     _linkingCandidateIds.clear();
-    _isPaired = _selectedDevice != null;
+    _favoriteCandidateIds.clear();
+    _isPaired = false;
     _updateStatus();
-    _log("Cleared candidate sublist.");
+    _log("Cleared active candidates.");
   }
 
   SyncService() {
     _initDefaultDevices();
+    _loadFavoritesFromStorage();
     fetchMyDeviceName();
     startUdpBeaconBroadcaster();
     startStopFileWatcher();
+  }
+
+  Future<void> _loadFavoritesFromStorage() async {
+    try {
+      List<Map<String, String>> favList = await _storageService.loadFavorites();
+      if (favList.isNotEmpty) {
+        _favoriteDevices = favList.map((m) => SyncDeviceItem(id: m['id']!, name: m['name']!)).toList();
+        _favoriteCandidateIds.addAll(_favoriteDevices.map((d) => d.id));
+        _isPaired = activeCandidates.isNotEmpty;
+        _updateStatus();
+        _log("Loaded ${_favoriteDevices.length} favorite device(s) from storage.");
+      }
+    } catch (e) {
+      debugPrint("Error loading favorites: $e");
+    }
+  }
+
+  Future<void> _saveFavoritesToStorage() async {
+    try {
+      List<SyncDeviceItem> toSave = activeCandidates.isNotEmpty
+          ? activeCandidates
+          : _favoriteDevices;
+
+      List<Map<String, String>> favMap = toSave.map((d) => {'id': d.id, 'name': d.name}).toList();
+      await _storageService.saveFavorites(favMap);
+    } catch (e) {
+      debugPrint("Error saving favorites: $e");
+    }
   }
 
   void _log(String msg) {
@@ -178,7 +265,6 @@ class SyncService {
       ),
     ];
     _selectedDevice = _discoveredDevices.first;
-    _linkingCandidateIds.add(_discoveredDevices.first.id);
   }
 
   void startUdpBeaconBroadcaster() async {
@@ -251,9 +337,16 @@ class SyncService {
     } else {
       _discoveredDevices.add(newItem);
     }
+
+    if (!_favoriteDevices.contains(newItem)) {
+      _favoriteDevices.add(newItem);
+      _favoriteCandidateIds.add(newItem.id);
+    }
+
     _selectedDevice = newItem;
     _isPaired = true;
     _updateStatus();
+    _saveFavoritesToStorage();
     _log("Added custom target device: $displayName");
   }
 
@@ -340,13 +433,13 @@ class SyncService {
   void selectDevice(SyncDeviceItem? device) {
     if (device != null) {
       _selectedDevice = device;
-      _isPaired = false;
+      _isPaired = activeCandidates.isNotEmpty;
       _updateStatus();
     }
   }
 
   void _updateStatus() {
-    int candidateCount = _linkingCandidateIds.length;
+    int candidateCount = activeCandidates.length;
     if (candidateCount > 0) {
       _lastStatusMessage = "Linked to $candidateCount candidate target(s) - Sync Ready";
       _pairingReminder = "Sync Ready! $candidateCount candidate target(s) linked for sequential sync.";
@@ -355,7 +448,7 @@ class SyncService {
       _pairingReminder = "Sync Ready! Pressing Photo/Record/Stop will sync on linked target.";
     } else {
       _lastStatusMessage = "Not Linked - Sync not yet done";
-      _pairingReminder = "Sync not complete! Open 'Devices Around', check candidate checkboxes, or tap Link.";
+      _pairingReminder = "No target devices selected in Favorite or Found lists! Open 'Devices Around' to check choices.";
     }
   }
 
@@ -458,16 +551,17 @@ class SyncService {
       }
 
       try {
-        _pairedSocket = await Socket.connect(
+        Socket pairedSock = await Socket.connect(
           targetAddress,
           8888,
           timeout: const Duration(seconds: 2),
         );
-        _pairedSocket!.write("PAIR_REQUEST\nRole: ${isMaster ? 'Master' : 'Slave'}\n");
-        await _pairedSocket!.flush();
+        pairedSock.write("PAIR_REQUEST\nRole: ${isMaster ? 'Master' : 'Slave'}\n");
+        await pairedSock.flush();
+        _pairedSockets[targetAddress] = pairedSock;
         pairSuccess = true;
       } catch (e) {
-        debugPrint("Local socket link notice: $e");
+        debugPrint("Local socket link notice for $targetAddress: $e");
       }
 
       if (!_isMaster && _isListening) {
@@ -492,7 +586,7 @@ class SyncService {
     if (_isListening) return;
 
     try {
-      _serverSocket = await ServerSocket.bind(InternetAddress.anyIPv4, 8888);
+      _serverSocket = await ServerSocket.bind(InternetAddress.anyIPv4, 8888, shared: true);
       _isListening = true;
 
       _serverSocket!.listen((Socket client) {
@@ -516,6 +610,7 @@ class SyncService {
           onError: (error) {
             debugPrint('Socket error: $error');
             client.destroy();
+            _connectedClients.remove(client);
           },
         );
       });
@@ -584,33 +679,37 @@ class SyncService {
       await socket.flush();
       await socket.close();
       success = true;
-      _log("-> Trigger sent via Socket to ${target.name} ($targetAddress)");
+      _log("-> Trigger sent via Direct Socket to ${target.name} ($targetAddress)");
     } catch (e) {
       debugPrint('Direct socket send notice for ${target.name}: $e');
     }
 
-    // 2. Try paired socket if open
-    if (!success && _pairedSocket != null) {
+    // 2. Try paired socket for SPECIFIC target address if open
+    if (!success && _pairedSockets.containsKey(targetAddress)) {
       try {
-        _pairedSocket!.write(fileContent);
-        await _pairedSocket!.flush();
+        Socket pairedSock = _pairedSockets[targetAddress]!;
+        pairedSock.write(fileContent);
+        await pairedSock.flush();
         success = true;
-        _log("-> Trigger sent via Paired Socket to ${target.name}");
+        _log("-> Trigger sent via Paired Socket to ${target.name} ($targetAddress)");
       } catch (e) {
-        debugPrint('Paired socket send notice: $e');
+        debugPrint('Paired socket send notice for $targetAddress: $e');
+        _pairedSockets.remove(targetAddress);
       }
     }
 
-    // 3. Try connected client sockets
+    // 3. Try connected client socket matching SPECIFIC target address
     if (!success && _connectedClients.isNotEmpty) {
       for (var client in _connectedClients) {
-        try {
-          client.write(fileContent);
-          await client.flush();
-          success = true;
-          _log("-> Trigger sent via Server Client socket to ${client.remoteAddress.address}");
-        } catch (e) {
-          debugPrint('Client socket send notice: $e');
+        if (client.remoteAddress.address == targetAddress) {
+          try {
+            client.write(fileContent);
+            await client.flush();
+            success = true;
+            _log("-> Trigger sent via Server Client socket to ${target.name} ($targetAddress)");
+          } catch (e) {
+            debugPrint('Client socket send notice for $targetAddress: $e');
+          }
         }
       }
     }
@@ -628,20 +727,22 @@ class SyncService {
     return success;
   }
 
-  Future<bool> sendStartedTriggerFile(File startedFile) async {
+  Future<bool> sendStartedTriggerFile(File startedFile, {bool onlyFirstDevice = false}) async {
     if (!_isMaster) return false;
 
-    List<SyncDeviceItem> targets = linkingCandidates.isNotEmpty
-        ? linkingCandidates
-        : (_selectedDevice != null ? [_selectedDevice!] : []);
+    List<SyncDeviceItem> targets = activeCandidates;
+    if (onlyFirstDevice && targets.isNotEmpty) {
+      targets = [targets.first];
+    }
 
     if (targets.isEmpty) {
-      _lastStatusMessage = "Cannot send: No candidate targets linked!";
+      _lastStatusMessage = "No target devices selected in Favorite or Found lists! Please select candidates in Devices Around.";
+      _log(_lastStatusMessage);
       return false;
     }
 
     String fileContent = await startedFile.readAsString();
-    _log("Starting sequential trigger send to ${targets.length} slave candidate(s)...");
+    _log("Starting trigger send to ${targets.length} slave target(s) (synviewrec 1st device only: $onlyFirstDevice)...");
 
     bool anySent = false;
     for (int i = 0; i < targets.length; i++) {
@@ -649,7 +750,7 @@ class SyncService {
       _log("Sequential Send [${i + 1}/${targets.length}] -> ${dev.name}");
       bool sent = await _sendTriggerToTarget(dev, fileContent);
       if (sent) anySent = true;
-      // Sequential pause between slave targets
+      _deviceRecordingStatus[dev.id] = true;
       await Future.delayed(const Duration(milliseconds: 200));
     }
 
@@ -659,10 +760,11 @@ class SyncService {
     return anySent;
   }
 
-  Future<bool> sendStopTriggerFile(File stopFile) async {
-    List<SyncDeviceItem> targets = linkingCandidates.isNotEmpty
-        ? linkingCandidates
-        : (_selectedDevice != null ? [_selectedDevice!] : []);
+  Future<bool> sendStopTriggerFile(File stopFile, {bool onlyFirstDevice = false}) async {
+    List<SyncDeviceItem> targets = activeCandidates;
+    if (onlyFirstDevice && targets.isNotEmpty) {
+      targets = [targets.first];
+    }
 
     if (targets.isEmpty) {
       _lastStatusMessage = "Cannot send stop: No candidate targets linked!";
@@ -671,7 +773,7 @@ class SyncService {
 
     await _storageService.createStopFile();
     String fileContent = await stopFile.readAsString();
-    _log("Starting sequential stop trigger send to ${targets.length} slave candidate(s)...");
+    _log("Starting stop trigger send to ${targets.length} slave target(s) (synviewrec 1st device only: $onlyFirstDevice)...");
 
     bool anySent = false;
     for (int i = 0; i < targets.length; i++) {
@@ -679,7 +781,12 @@ class SyncService {
       _log("Sequential Stop Send [${i + 1}/${targets.length}] -> ${dev.name}");
       bool sent = await _sendTriggerToTarget(dev, fileContent);
       if (sent) anySent = true;
+      _deviceRecordingStatus[dev.id] = false;
       await Future.delayed(const Duration(milliseconds: 200));
+    }
+
+    if (!onlyFirstDevice) {
+      _deviceRecordingStatus.clear();
     }
 
     _lastStatusMessage = anySent
@@ -694,7 +801,10 @@ class SyncService {
     _syncFileWatcherTimer?.cancel();
     _syncStopFileWatcherTimer?.cancel();
     _bleScanSub?.cancel();
-    _pairedSocket?.destroy();
+    for (var sock in _pairedSockets.values) {
+      sock.destroy();
+    }
+    _pairedSockets.clear();
     _serverSocket?.close();
     for (var socket in _connectedClients) {
       socket.destroy();
