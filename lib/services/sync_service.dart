@@ -432,7 +432,6 @@ class SyncService {
           await _selectedDevice!.bleDevice!.connect(
             timeout: const Duration(seconds: 5),
             autoConnect: false,
-            license: License.nonprofit,
           );
 
           String resolvedName = _selectedDevice!.bleDevice!.platformName;

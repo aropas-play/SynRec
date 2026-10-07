@@ -1,12 +1,21 @@
 import 'dart:io';
 import 'package:camera/camera.dart';
+import 'package:camera_macos/camera_macos_arguments.dart';
+import 'package:camera_macos/camera_macos_controller.dart';
+import 'package:camera_macos/camera_macos_device.dart';
+import 'package:camera_macos/camera_macos_file.dart';
+import 'package:camera_macos/camera_macos_platform_interface.dart';
+import 'package:camera_macos/camera_macos_view.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 class CameraService {
   CameraController? _controller;
+  CameraMacOSController? _macOSController;
+  String? _macOSDeviceId;
   List<CameraDescription> _cameras = [];
   bool _isInitialized = false;
   bool _isVirtualMode = false;
@@ -28,6 +37,15 @@ class CameraService {
         "Audio Stream": "Disabled (Sync Optimized)",
         "Available Cameras": "${_cameras.length} found",
         "Virtual Feed Info": "Feed active for dual-instance testing",
+      };
+    }
+
+    if (!kIsWeb && Platform.isMacOS) {
+      return {
+        "Camera Mode": "macOS Physical Camera (AVFoundation)",
+        "Status": _isRecording ? "Recording Video" : "Camera Ready",
+        "Device ID": _macOSDeviceId ?? "FaceTime HD Camera",
+        "Audio Stream": "Disabled (Sync Optimized)",
       };
     }
 
@@ -66,9 +84,51 @@ class CameraService {
         ].request();
       }
 
+      if (!kIsWeb && Platform.isMacOS) {
+        try {
+          final macosDevices = await CameraMacOSPlatform.instance.listDevices(
+            deviceType: CameraMacOSDeviceType.video,
+          );
+          if (macosDevices.isNotEmpty) {
+            final builtInCamera = macosDevices.where((device) {
+              final name = device.localizedName?.toLowerCase() ?? '';
+              return name.contains('facetime') || name.contains('built-in');
+            });
+            _macOSDeviceId = builtInCamera.isNotEmpty
+                ? builtInCamera.first.deviceId
+                : macosDevices.first.deviceId;
+            _isInitialized = true;
+            _isVirtualMode = false;
+            _errorMessage = null;
+            debugPrint('macOS Camera initialized with deviceId: $_macOSDeviceId');
+            return true;
+          }
+        } catch (e) {
+          debugPrint('macOS Camera listDevices error: $e');
+        }
+      }
+
       _cameras = await availableCameras();
       if (_cameras.isNotEmpty) {
-        for (var camera in _cameras) {
+        // Sort cameras: prioritize physical front camera (e.g. FaceTime HD) over virtual cameras
+        List<CameraDescription> sortedCameras = List.from(_cameras);
+        sortedCameras.sort((a, b) {
+          bool aIsVirtual = a.name.toLowerCase().contains('virtual');
+          bool bIsVirtual = b.name.toLowerCase().contains('virtual');
+          if (aIsVirtual != bIsVirtual) return aIsVirtual ? 1 : -1;
+
+          bool aIsFront = a.lensDirection == CameraLensDirection.front ||
+              a.name.toLowerCase().contains('facetime') ||
+              a.name.toLowerCase().contains('front');
+          bool bIsFront = b.lensDirection == CameraLensDirection.front ||
+              b.name.toLowerCase().contains('facetime') ||
+              b.name.toLowerCase().contains('front');
+          if (aIsFront != bIsFront) return aIsFront ? -1 : 1;
+
+          return 0;
+        });
+
+        for (var camera in sortedCameras) {
           try {
             _controller = CameraController(
               camera,
@@ -79,6 +139,7 @@ class CameraService {
             _isInitialized = true;
             _isVirtualMode = false;
             _errorMessage = null;
+            debugPrint('Initialized physical camera: ${camera.name} (${camera.lensDirection})');
             return true;
           } catch (e) {
             debugPrint('Camera ${camera.name} in use or unavailable: $e');
@@ -100,9 +161,61 @@ class CameraService {
     }
   }
 
+  Widget buildPreviewWidget({VoidCallback? onInitialized}) {
+    if (!kIsWeb && Platform.isMacOS && !_isVirtualMode) {
+      final deviceId = _macOSDeviceId;
+      if (deviceId == null) {
+        return const ColoredBox(color: Colors.black87);
+      }
+      return CameraMacOSView(
+        key: ValueKey(deviceId),
+        deviceId: deviceId,
+        cameraMode: CameraMacOSMode.photo,
+        enableAudio: false,
+        fit: BoxFit.cover,
+        resolution: PictureResolution.high,
+        pictureFormat: PictureFormat.jpeg,
+        onCameraInizialized: (controller) {
+          _macOSController = controller;
+          if (onInitialized != null) onInitialized();
+        },
+        onCameraLoading: (_) => const ColoredBox(color: Colors.black87),
+      );
+    }
+
+    if (_controller != null && _controller!.value.isInitialized) {
+      return ClipRRect(child: CameraPreview(_controller!));
+    }
+
+    return const ColoredBox(color: Colors.black87);
+  }
+
   Future<XFile?> takePicture() async {
     if (_isVirtualMode) {
       return await _generateVirtualJpgFile();
+    }
+
+    if (!kIsWeb && Platform.isMacOS) {
+      if (_macOSController == null || _macOSController!.isDestroyed) {
+        _errorMessage = "macOS Camera is not initialized.";
+        return null;
+      }
+      try {
+        final imageData = await _macOSController!.takePicture();
+        final bytes = imageData?.bytes;
+        if (bytes == null) return null;
+        Directory tempDir = await getTemporaryDirectory();
+        String filePath = p.join(
+          tempDir.path,
+          'photo_${DateTime.now().millisecondsSinceEpoch}.jpg',
+        );
+        File file = File(filePath);
+        await file.writeAsBytes(bytes, flush: true);
+        return XFile(filePath);
+      } catch (e) {
+        _errorMessage = "Failed to take photo: $e";
+        return null;
+      }
     }
 
     if (_controller == null || !_controller!.value.isInitialized) {
@@ -124,6 +237,22 @@ class CameraService {
       _isRecording = true;
       _errorMessage = null;
       return true;
+    }
+
+    if (!kIsWeb && Platform.isMacOS) {
+      if (_macOSController == null || _macOSController!.isDestroyed) {
+        _errorMessage = "macOS Camera is not initialized.";
+        return false;
+      }
+      try {
+        bool success = await _macOSController!.recordVideo() ?? false;
+        _isRecording = success;
+        _errorMessage = success ? null : "Failed to start macOS video recording.";
+        return _isRecording;
+      } catch (e) {
+        _errorMessage = "Failed to start recording: $e";
+        return false;
+      }
     }
 
     if (_controller == null || !_controller!.value.isInitialized) {
@@ -150,6 +279,22 @@ class CameraService {
     if (_isVirtualMode) {
       _isRecording = false;
       return await _generateVirtualMp4File();
+    }
+
+    if (!kIsWeb && Platform.isMacOS) {
+      if (_macOSController == null || !_isRecording) {
+        return null;
+      }
+      try {
+        CameraMacOSFile? fileData = await _macOSController!.stopRecording();
+        _isRecording = false;
+        if (fileData?.url == null) return null;
+        return XFile(fileData!.url!);
+      } catch (e) {
+        _errorMessage = "Failed to stop recording: $e";
+        _isRecording = false;
+        return null;
+      }
     }
 
     if (_controller == null || !_isRecording) {
@@ -199,6 +344,11 @@ class CameraService {
   void dispose() {
     _controller?.dispose();
     _controller = null;
+    if (_macOSController != null && !_macOSController!.isDestroyed) {
+      _macOSController!.destroy();
+      _macOSController = null;
+    }
+    _macOSDeviceId = null;
     _isInitialized = false;
     _isVirtualMode = false;
     _isRecording = false;

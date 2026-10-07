@@ -327,9 +327,9 @@ class HomeScreen extends StatelessWidget {
       );
     }
 
-    if (controller.isCameraInitialized && controller.cameraController != null) {
+    if (controller.isCameraInitialized) {
       return ClipRRect(
-        child: CameraPreview(controller.cameraController!),
+        child: controller.cameraService.buildPreviewWidget(),
       );
     }
 
