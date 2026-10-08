@@ -94,6 +94,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> _init() async {
     _addLog("Initializing camera and services...");
+    await storageService.cleanTempDirectory();
     bool camSuccess = await cameraService.initialize();
     if (camSuccess) {
       _addLog("Camera initialized successfully.");
@@ -443,6 +444,16 @@ class AppController extends ChangeNotifier {
       return;
     }
 
+    if (_tempRecordedFile != null) {
+      try {
+        File oldFile = File(_tempRecordedFile!.path);
+        if (oldFile.existsSync()) {
+          oldFile.deleteSync();
+        }
+      } catch (_) {}
+      _tempRecordedFile = null;
+    }
+
     bool success = await cameraService.startVideoRecording();
     if (success) {
       _isRecording = true;
@@ -529,6 +540,7 @@ class AppController extends ChangeNotifier {
     String? savedPath = await storageService.saveRecordedVideo(_tempRecordedFile!);
     if (savedPath != null) {
       _savedVideoPath = savedPath;
+      _tempRecordedFile = null;
       _statusMessage = "Saved video to: $savedPath";
       _addLog("Saved video as: ${savedPath.split(Platform.pathSeparator).last}");
     } else {

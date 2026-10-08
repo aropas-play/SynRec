@@ -142,6 +142,17 @@ class StorageService {
         debugPrint('Gal gallery save notice: $e');
       }
 
+      // Cleanup temporary source video file after successful save
+      try {
+        File sourceTempFile = File(videoFile.path);
+        if (await sourceTempFile.exists() && sourceTempFile.path != savedFile.path) {
+          await sourceTempFile.delete();
+          debugPrint('Cleaned up temporary source video file: ${sourceTempFile.path}');
+        }
+      } catch (e) {
+        debugPrint('Notice deleting temporary source video: $e');
+      }
+
       return savedFile.path;
     } catch (e) {
       debugPrint('Error saving video: $e');
@@ -181,6 +192,17 @@ class StorageService {
         }
       } catch (e) {
         debugPrint('Gal photo save notice: $e');
+      }
+
+      // Cleanup temporary source photo file after successful save
+      try {
+        File sourceTempFile = File(photoFile.path);
+        if (await sourceTempFile.exists() && sourceTempFile.path != savedFile.path) {
+          await sourceTempFile.delete();
+          debugPrint('Cleaned up temporary source photo file: ${sourceTempFile.path}');
+        }
+      } catch (e) {
+        debugPrint('Notice deleting temporary source photo: $e');
       }
 
       return savedFile.path;
@@ -358,6 +380,34 @@ class StorageService {
       } catch (e) {
         debugPrint("Error deleting stop.txt: $e");
       }
+    }
+  }
+
+  /// Cleans up leftover temporary files (.jpg, .mp4, .tmp) in `getTemporaryDirectory()`
+  Future<void> cleanTempDirectory() async {
+    try {
+      Directory tempDir = await getTemporaryDirectory();
+      if (await tempDir.exists()) {
+        List<FileSystemEntity> files = tempDir.listSync();
+        for (FileSystemEntity entity in files) {
+          if (entity is File) {
+            String name = p.basename(entity.path).toLowerCase();
+            if (name.startsWith('photo_') ||
+                name.startsWith('virtual_') ||
+                name.startsWith('rec') ||
+                name.endsWith('.jpg') ||
+                name.endsWith('.mp4') ||
+                name.endsWith('.tmp')) {
+              try {
+                await entity.delete();
+                debugPrint('Cleaned up temp file on startup: ${entity.path}');
+              } catch (_) {}
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error cleaning temp directory: $e');
     }
   }
 }
